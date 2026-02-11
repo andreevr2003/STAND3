@@ -22,7 +22,13 @@
 #include "max31865.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 /* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
@@ -45,6 +51,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+
 /* USER CODE BEGIN PV */
 
 /* ---- Temperature from MAX31865 ---- */
@@ -53,23 +60,25 @@ static uint16_t g_rtd_raw = 0;
 static uint8_t  g_rtd_fault = 0;
 
 /* ---- MAX31865 device handle ---- */
-static max31865_t g_max31865;
+static Max31865_t g_max31865;
 
-/* ---- PID Controller ---- */
+/* ---- Bidirectional PID Controller ---- */
 typedef struct {
     float Kp, Ki, Kd;
     float integral;
-    float prev_error;
-    uint32_t output;
+    float prev_measurement; /* derivative on measurement, not error */
+    float output;           /* -95..+95: negative=cool, positive=heat */
+    uint8_t first;          /* first cycle flag */
 } pid_ctrl_t;
 
 static pid_ctrl_t g_pid = {
-    .Kp = 2.0f,
-    .Ki = 0.05f,
-    .Kd = 5.0f,
+    .Kp = 6.0f,
+    .Ki = 0.1f,
+    .Kd = 2.0f,
     .integral = 0.0f,
-    .prev_error = 0.0f,
-    .output = 0u,
+    .prev_measurement = 0.0f,
+    .output = 0.0f,
+    .first = 1,
 };
 
 /* USER CODE END PV */
@@ -213,37 +222,56 @@ static btn_mask_t buttons_get_long_press(void)
 }
 
 /* =======================================================================
-   PID Controller
+   Bidirectional PID Controller
+   Output range: -95 .. +95
+     positive → HEAT  (current flows one direction)
+     negative → COOL  (current flows opposite direction)
+
+   Uses "derivative on measurement" to avoid derivative kick
+   when the setpoint changes.
    ======================================================================= */
 static void pid_reset(pid_ctrl_t *pid)
 {
-    pid->integral   = 0.0f;
-    pid->prev_error = 0.0f;
-    pid->output     = 0u;
+    pid->integral         = 0.0f;
+    pid->prev_measurement = 0.0f;
+    pid->output           = 0.0f;
+    pid->first            = 1;
 }
 
-static uint32_t pid_update(pid_ctrl_t *pid, uint32_t setpoint, uint32_t measured)
+static float pid_update(pid_ctrl_t *pid, float setpoint, float measured)
 {
-    float error = (float)setpoint - (float)measured;
+    float error = setpoint - measured;
 
+    /* Integral with anti-windup */
     pid->integral += error;
-    /* Anti-windup */
-    float integral_max = 95.0f / pid->Ki;
+    float integral_max = 90.0f / pid->Ki;
     if (pid->integral >  integral_max) pid->integral =  integral_max;
     if (pid->integral < -integral_max) pid->integral = -integral_max;
 
-    float derivative = error - pid->prev_error;
-    pid->prev_error  = error;
+    /* Derivative on MEASUREMENT (not error) — avoids kick on setpoint change.
+       d/dt(error) = d/dt(setpoint - measured) → when setpoint jumps,
+       the derivative spikes.  Using -d/dt(measured) instead. */
+    float derivative = 0.0f;
+    if (pid->first) {
+        pid->first = 0;
+    } else {
+        derivative = -(measured - pid->prev_measurement);
+    }
+    pid->prev_measurement = measured;
 
     float out = pid->Kp * error
               + pid->Ki * pid->integral
               + pid->Kd * derivative;
 
-    if (out < 0.0f)  out = 0.0f;
-    if (out > 95.0f) out = 95.0f;
+    /* Light smoothing */
+    out = pid->output * 0.2f + out * 0.8f;
 
-    pid->output = (uint32_t)out;
-    return pid->output;
+    /* Clamp to ±95% */
+    if (out >  95.0f) out =  95.0f;
+    if (out < -95.0f) out = -95.0f;
+
+    pid->output = out;
+    return out;
 }
 
 /* =======================================================================
@@ -357,10 +385,20 @@ int main(void)
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
@@ -382,16 +420,9 @@ int main(void)
   /* Default to internal control */
   peltier_set_source(PELTIER_CTRL_INTERNAL);
 
-  /* ---- MAX31865 init ---- */
-  g_max31865.hspi        = &hspi2;
-  g_max31865.cs_port     = CS_GPIO_Port;
-  g_max31865.cs_pin      = CS_Pin;
-  g_max31865.rtd_type    = MAX31865_RTD_PT100;
-  g_max31865.wire        = MAX31865_WIRE_2;
-  g_max31865.ref_resistor = 430.0f;    /* 430 ohm reference for PT100 */
-  g_max31865.rtd_nominal  = 100.0f;    /* PT100 = 100 ohm at 0 C */
-
-  uint8_t max_ok = max31865_init(&g_max31865);
+  /* ---- MAX31865 init (NimaLTD library) ---- */
+  memset(&g_max31865, 0, sizeof(g_max31865));
+  Max31865_init(&g_max31865, &hspi2, CS_GPIO_Port, CS_Pin, 2, 50);
 
   /* ---- I2C probe: check if OLED responds ---- */
   uint8_t i2c_ok = 0;
@@ -413,22 +444,6 @@ int main(void)
   u8g2_SetPowerSave(&u8g2, 0);
   u8g2_SetFont(&u8g2, u8g2_font_helvB14_tr);
 
-  /* Show startup screen */
-  u8g2_FirstPage(&u8g2);
-  do {
-    char buf[22];
-    if (i2c_ok == 1 && max_ok) {
-      snprintf(buf, sizeof(buf), "STAND3 OK");
-    } else if (!max_ok) {
-      snprintf(buf, sizeof(buf), "RTD ERR!");
-    } else {
-      snprintf(buf, sizeof(buf), "NO OLED!");
-    }
-    u8g2_uint_t w = u8g2_GetStrWidth(&u8g2, buf);
-    u8g2_DrawStr(&u8g2, (128 - w) / 2, 24, buf);
-  } while (u8g2_NextPage(&u8g2));
-  HAL_Delay(1500);
-
   /* Menu init */
   config_menu_init();
 
@@ -445,17 +460,36 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* ---- 1.  Read MAX31865 temperature (once per second) ---- */
+    /* ---- 1.  Read MAX31865 temperature ---- */
+    /* NimaLTD library: each readTempC call does
+       bias-on -> 10ms -> 1shot -> 65ms -> read -> bias-off.
+       We call it every 1 second with smoothing filter. */
     {
-      static uint32_t last_temp_tick = 0;
+      static uint32_t last_read_tick = 0;
+      static float filtered_temp = 0.0f;
+      static uint8_t first_read = 1;
       uint32_t now_t = HAL_GetTick();
-      if ((now_t - last_temp_tick) >= 1000u) {
-        last_temp_tick = now_t;
-        g_rtd_raw = max31865_read_rtd_raw(&g_max31865);
-        g_temp_celsius = max31865_read_temperature(&g_max31865);
-        g_rtd_fault = max31865_read_fault(&g_max31865);
-        if (g_rtd_fault) {
-          max31865_clear_fault(&g_max31865);
+
+      if ((now_t - last_read_tick) >= 1000u) {
+        last_read_tick = now_t;
+
+        float t = 0.0f;
+        bool ok = Max31865_readTempC(&g_max31865, &t);
+
+        if (ok) {
+          if (first_read) {
+            filtered_temp = t;
+            first_read = 0;
+          } else {
+            filtered_temp = Max31865_Filter(t, filtered_temp, 0.3f);
+          }
+          g_temp_celsius = filtered_temp;
+          /* Use the raw value already captured by readTempC;
+             no need for a second readRTD call. */
+          g_rtd_raw = g_max31865.last_rtd;
+          g_rtd_fault = 0;
+        } else {
+          g_rtd_fault = Max31865_readFault(&g_max31865);
         }
       }
     }
@@ -517,24 +551,70 @@ int main(void)
     if (peltier_st != prev_peltier_st) {
       if (peltier_st == CONFIG_PELTIER_RUN && ctrl_src == CONFIG_CTRL_INTERNAL) {
         pid_reset(&g_pid);
-        g_peltier_mode = PELTIER_HEAT;
-        peltier_set_pwm(3u);  /* initial kick */
+        /* PID will decide direction on first update */
       } else {
         peltier_stop();
       }
       prev_peltier_st = peltier_st;
     }
 
-    /* ---- 6.  PID temperature control (only in INTERNAL mode) ---- */
-    if (g_peltier_mode != PELTIER_OFF && ctrl_src == CONFIG_CTRL_INTERNAL) {
+    /* ---- 6.  Bidirectional PID temperature control ---- */
+    if (peltier_st == CONFIG_PELTIER_RUN && ctrl_src == CONFIG_CTRL_INTERNAL) {
       static uint32_t last_pid = 0;
+      static peltier_mode_t last_dir = PELTIER_OFF;
+      static uint32_t dir_change_tick = 0;
+      static float prev_target = -999.0f;
       uint32_t now = HAL_GetTick();
+
       if ((now - last_pid) >= PID_UPDATE_MS) {
         last_pid = now;
-        uint32_t target = config_menu_get_temp_target();
-        uint32_t measured = (g_temp_celsius > 0.0f) ? (uint32_t)g_temp_celsius : 0u;
-        uint32_t pwr = pid_update(&g_pid, target, measured);
-        peltier_set_pwm(pwr);
+        float target  = (float)config_menu_get_temp_target();
+        float measured = g_temp_celsius;
+
+        /* Reset integral when setpoint changes to avoid windup carryover */
+        if (target != prev_target) {
+          g_pid.integral = 0.0f;
+          g_pid.first    = 1;
+          prev_target    = target;
+        }
+
+        float out = pid_update(&g_pid, target, measured);
+
+        /* Determine desired direction */
+        peltier_mode_t desired_dir;
+        uint32_t duty;
+        if (out > 0.5f) {
+          desired_dir = PELTIER_HEAT;
+          duty = (uint32_t)out;
+          if (duty < 8u) duty = 8u; /* minimum to actually move */
+        } else if (out < -0.5f) {
+          desired_dir = PELTIER_COOL;
+          duty = (uint32_t)(-out);
+          if (duty < 8u) duty = 8u;
+        } else {
+          desired_dir = PELTIER_OFF;
+          duty = 0u;
+        }
+
+        /* Direction-change lockout: must stay in one direction
+           for at least 5 seconds before switching to prevent
+           rapid heat/cool toggling that stresses the Peltier. */
+        if (desired_dir != last_dir && desired_dir != PELTIER_OFF
+            && last_dir != PELTIER_OFF) {
+          if ((now - dir_change_tick) < 5000u) {
+            /* Too soon to reverse — just turn off for now */
+            desired_dir = PELTIER_OFF;
+            duty = 0u;
+          }
+        }
+
+        if (desired_dir != last_dir) {
+          dir_change_tick = now;
+          last_dir = desired_dir;
+        }
+
+        g_peltier_mode = desired_dir;
+        peltier_set_pwm(duty);
       }
     }
 
@@ -571,17 +651,17 @@ int main(void)
         /* ------ Live Sensor View ------ */
         case MENU_SENSOR_VIEW:
         {
-          char line1[22], line2[22];
+          char line1[24], line2[24];
           int32_t t_int = (int32_t)g_temp_celsius;
-          snprintf(line1, sizeof(line1), "T: %ld \xB0" "C",
-                   (long)t_int);
-          snprintf(line2, sizeof(line2), "RTD: %u",
-                   (unsigned)g_rtd_raw);
-          u8g2_SetFont(&u8g2, u8g2_font_helvB14_te);
-          u8g2_uint_t w1 = u8g2_GetStrWidth(&u8g2, line1);
-          u8g2_uint_t w2 = u8g2_GetStrWidth(&u8g2, line2);
-          u8g2_DrawStr(&u8g2, (128 - w1) / 2, 14, line1);
-          u8g2_DrawStr(&u8g2, (128 - w2) / 2, 30, line2);
+          float r_ohm = (float)g_rtd_raw * MAX31865_RREF / 32768.0f;
+          int32_t r_x10 = (int32_t)(r_ohm * 10.0f);
+          snprintf(line1, sizeof(line1), "T:%ld%cC R:%ld.%ld",
+                   (long)t_int, 0xB0, (long)(r_x10/10), (long)(r_x10%10));
+          snprintf(line2, sizeof(line2), "ADC:%u F:%02X",
+                   (unsigned)g_rtd_raw, g_rtd_fault);
+          u8g2_SetFont(&u8g2, u8g2_font_6x10_tr);
+          u8g2_DrawStr(&u8g2, 0, 12, line1);
+          u8g2_DrawStr(&u8g2, 0, 28, line2);
           break;
         }
 
@@ -590,8 +670,8 @@ int main(void)
         case MENU_TEMP_DEC:
         {
           char buf[16];
-          snprintf(buf, sizeof(buf), "%lu \xB0" "C",
-                   (unsigned long)config_menu_get_temp_target());
+          snprintf(buf, sizeof(buf), "%ld \xB0" "C",
+                   (long)config_menu_get_temp_target());
           u8g2_SetFont(&u8g2, u8g2_font_helvB24_te);
           u8g2_uint_t w = u8g2_GetStrWidth(&u8g2, buf);
           u8g2_DrawStr(&u8g2, (128 - w) / 2, 30, buf);
@@ -629,11 +709,14 @@ int main(void)
         {
           char line1[22], line2[22];
           int32_t t_int = (int32_t)g_temp_celsius;
-          snprintf(line1, sizeof(line1), "PWR: %lu%%",
-                   (unsigned long)g_pid.output);
-          snprintf(line2, sizeof(line2), "T:%ld\xB0" "C S:%lu\xB0" "C",
+          int32_t pwr_abs = (int32_t)(g_pid.output >= 0 ? g_pid.output : -g_pid.output);
+          const char *dir = (g_peltier_mode == PELTIER_HEAT) ? "H" :
+                            (g_peltier_mode == PELTIER_COOL) ? "C" : "-";
+          snprintf(line1, sizeof(line1), "%s %ld%%",
+                   dir, (long)pwr_abs);
+          snprintf(line2, sizeof(line2), "T:%ld\xB0" "C S:%ld\xB0" "C",
                    (long)t_int,
-                   (unsigned long)config_menu_get_temp_target());
+                   (long)config_menu_get_temp_target());
           u8g2_SetFont(&u8g2, u8g2_font_helvB12_te);
           u8g2_uint_t w1i = u8g2_GetStrWidth(&u8g2, line1);
           u8g2_uint_t w2i = u8g2_GetStrWidth(&u8g2, line2);

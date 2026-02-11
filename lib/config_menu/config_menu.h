@@ -37,7 +37,7 @@ void config_menu_process_cmd(ctrl_menu_cmd_t cmd);
 
 config_ctrl_source_t   config_menu_get_ctrl_source(void);
 config_peltier_state_t config_menu_get_peltier_state(void);
-uint32_t               config_menu_get_temp_target(void);
+int32_t                config_menu_get_temp_target(void);
 void                   config_menu_temp_increase(void);
 void                   config_menu_temp_decrease(void);
 

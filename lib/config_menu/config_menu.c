@@ -3,7 +3,7 @@
 
 static config_ctrl_source_t   ctrl_source   = CONFIG_CTRL_INTERNAL;
 static config_peltier_state_t peltier_state = CONFIG_PELTIER_STOP;
-static uint32_t temp_target = 50u;   /* default: 50 C */
+static int32_t temp_target = 25;   /* default: 25 C */
 
 static void temp_inc_callback(void);
 static void temp_dec_callback(void);
@@ -29,19 +29,17 @@ ctrl_menu_t app_menu;
 
 static void temp_inc_callback(void)
 {
-    if (temp_target < 150u) {
-        temp_target += 5u;
-        if (temp_target > 150u) temp_target = 150u;
+    if (temp_target < 150) {
+        temp_target += 5;
+        if (temp_target > 150) temp_target = 150;
     }
 }
 
 static void temp_dec_callback(void)
 {
-    if (temp_target > 0u) {
-        if (temp_target >= 5u)
-            temp_target -= 5u;
-        else
-            temp_target = 0u;
+    if (temp_target > -30) {
+        temp_target -= 5;
+        if (temp_target < -30) temp_target = -30;
     }
 }
 
@@ -96,7 +94,7 @@ config_peltier_state_t config_menu_get_peltier_state(void)
     return peltier_state;
 }
 
-uint32_t config_menu_get_temp_target(void)
+int32_t config_menu_get_temp_target(void)
 {
     return temp_target;
 }

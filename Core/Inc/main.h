@@ -69,12 +69,12 @@ void Error_Handler(void);
 #define MUX_EN_GPIO_Port GPIOB
 #define CS_Pin GPIO_PIN_12
 #define CS_GPIO_Port GPIOB
-#define DOWN_SW_Pin GPIO_PIN_9
-#define DOWN_SW_GPIO_Port GPIOA
-#define OK_SW_Pin GPIO_PIN_10
-#define OK_SW_GPIO_Port GPIOA
-#define UP_SW_Pin GPIO_PIN_11
-#define UP_SW_GPIO_Port GPIOA
+#define DOWN_SW_Pin GPIO_PIN_7
+#define DOWN_SW_GPIO_Port GPIOC
+#define OK_SW_Pin GPIO_PIN_8
+#define OK_SW_GPIO_Port GPIOC
+#define UP_SW_Pin GPIO_PIN_9
+#define UP_SW_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
 

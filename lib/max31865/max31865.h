@@ -1,57 +1,46 @@
-#ifndef MAX31865_H
-#define MAX31865_H
+/**
+ * MAX31865 RTD-to-Digital Converter Library
+ * Based on NimaLTD's library (github.com/NimaLTD)
+ * Adapted for STAND3 project - STM32F103RB
+ */
+#ifndef _MAX31865_H
+#define _MAX31865_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include "stm32f1xx_hal.h"
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-/* ---- MAX31865 Register addresses ---- */
-#define MAX31865_REG_CONFIG       0x00
-#define MAX31865_REG_RTD_MSB      0x01
-#define MAX31865_REG_RTD_LSB      0x02
-#define MAX31865_REG_HFT_MSB      0x03
-#define MAX31865_REG_HFT_LSB      0x04
-#define MAX31865_REG_LFT_MSB      0x05
-#define MAX31865_REG_LFT_LSB      0x06
-#define MAX31865_REG_FAULT        0x07
-
-/* ---- Configuration bits ---- */
-#define MAX31865_CFG_BIAS         0x80
-#define MAX31865_CFG_MODEAUTO     0x40
-#define MAX31865_CFG_1SHOT        0x20
-#define MAX31865_CFG_3WIRE        0x10
-#define MAX31865_CFG_FAULT_CLR    0x02
-#define MAX31865_CFG_FILTER_50HZ  0x01
-
-/* ---- RTD type ---- */
-typedef enum {
-    MAX31865_RTD_PT100 = 0,
-    MAX31865_RTD_PT1000
-} max31865_rtd_type_t;
-
-/* ---- Wiring type ---- */
-typedef enum {
-    MAX31865_WIRE_2 = 0,
-    MAX31865_WIRE_3,
-    MAX31865_WIRE_4
-} max31865_wire_t;
+/* ---- Configuration ---- */
+#define MAX31865_RREF      430.0f    /* Reference resistor on board */
+#define MAX31865_RNOMINAL  100.0f    /* PT100 = 100 ohm at 0 C */
 
 /* ---- Device handle ---- */
-typedef struct {
-    SPI_HandleTypeDef *hspi;
-    GPIO_TypeDef      *cs_port;
+typedef struct
+{
+    GPIO_TypeDef      *cs_gpio;
     uint16_t           cs_pin;
-    max31865_rtd_type_t rtd_type;
-    max31865_wire_t     wire;
-    float              ref_resistor;   /* Reference resistor value (e.g. 430.0 for PT100) */
-    float              rtd_nominal;    /* RTD nominal resistance at 0C (100.0 for PT100) */
-} max31865_t;
+    SPI_HandleTypeDef *spi;
+    uint8_t            lock;
+    uint16_t           last_rtd;   /* raw 15-bit ADC from last readTempC */
+} Max31865_t;
 
-/* ---- API ---- */
-bool     max31865_init(max31865_t *dev);
-uint16_t max31865_read_rtd_raw(max31865_t *dev);
-float    max31865_read_temperature(max31865_t *dev);
-uint8_t  max31865_read_fault(max31865_t *dev);
-void     max31865_clear_fault(max31865_t *dev);
+/* ---- Public API ---- */
+void  Max31865_init(Max31865_t *max31865, SPI_HandleTypeDef *spi,
+                    GPIO_TypeDef *cs_gpio, uint16_t cs_pin,
+                    uint8_t numwires, uint8_t filterHz);
+bool  Max31865_readTempC(Max31865_t *max31865, float *readTemp);
+bool  Max31865_readTempF(Max31865_t *max31865, float *readTemp);
+float Max31865_Filter(float newInput, float lastOutput, float effectiveFactor);
+uint8_t Max31865_readFault(Max31865_t *max31865);
+uint16_t Max31865_readRTD(Max31865_t *max31865);
+void Max31865_readAllRegisters(Max31865_t *max31865, uint8_t regs[8]);
 
-#endif /* MAX31865_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _MAX31865_H */
